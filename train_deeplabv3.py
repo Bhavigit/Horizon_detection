@@ -9,19 +9,21 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from collections import Counter
 import matplotlib.pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
 
 # 1. CONFIG
-
-DATA_DIR = "/content/Deeplab_V3_dataset"
+DATA_DIR = "/content/horizon_dataset_1"
 IMAGE_DIR = os.path.join(DATA_DIR, 'images')
 MASK_DIR = os.path.join(DATA_DIR, 'masks')
 BATCH_SIZE = 4
 NUM_CLASSES = 2
-EPOCHS = 80
+EPOCHS = 100
+PATIENCE = 15
+ENCODER_NAME = "resnet101"
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# 2. DATASET CLASS
 
+# 2. DATASET CLASS
 class SegDataset(torch.utils.data.Dataset):
     def __init__(self, img_dir, mask_dir, transform=None):
         self.img_dir = img_dir
@@ -35,19 +37,24 @@ class SegDataset(torch.utils.data.Dataset):
             raise FileNotFoundError(f"Mask directory not found: {self.mask_dir}")
         self.images = sorted(os.listdir(img_dir))
         print(f"Initialized dataset with {len(self.images)} images from {self.img_dir}")
+
     def __len__(self):
         return len(self.images)
+
     def __getitem__(self, idx):
         img_path = os.path.join(self.img_dir, self.images[idx])
         mask_path = os.path.join(self.mask_dir, self.images[idx].replace('.jpg', '.png'))
+
         image = np.array(Image.open(img_path).convert("RGB"))
         mask = np.array(Image.open(mask_path))
+
         if mask.ndim == 3:
             if mask.shape[2] == 1:
                 mask = mask.squeeze(-1)
             elif mask.shape[2] == 3:
                 mask = mask[:, :, 0]
         mask = (mask > 0).astype(np.uint8)
+
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
             image = augmented['image']
@@ -55,6 +62,7 @@ class SegDataset(torch.utils.data.Dataset):
             mask = mask.long()
         else:
             mask = torch.from_numpy(mask).long()
+
         if idx == 0:
             mask_np_values = np.unique(mask.cpu().numpy())
             print(f"DEBUG (SegDataset): Mask unique values for first image ({self.images[idx]}): {mask_np_values}")
@@ -62,28 +70,34 @@ class SegDataset(torch.utils.data.Dataset):
                 print("DEBUG (SegDataset): Confirmed: Class 1 (horizon) IS present in a training mask.")
             else:
                 print("DEBUG (SegDataset): WARNING: Class 1 (horizon) NOT found in the first training mask. Check mask preprocessing!")
+
         return image, mask
 
 
 # 3. HELPER FUNCTIONS
-
 def get_transforms():
-    
+    "Returns data augmentation and normalization transforms."
     train_transforms = A.Compose([
-        A.Resize(256, 256),
+        A.Resize(height=256, width=256),
+        A.RandomResizedCrop(size=(256, 256), scale=(0.5, 1.0), ratio=(0.75, 1.33)),
         A.HorizontalFlip(p=0.5),
-        A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=5, p=0.4),
-        A.Perspective(scale=(0.02, 0.05), p=0.3, keep_size=True),
-        A.ElasticTransform(alpha=1, sigma=50, p=0.1),
+        A.VerticalFlip(p=0.5),
+        A.Rotate(limit=30, p=0.7),
+        A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1, p=0.8),
+        A.GaussianBlur(blur_limit=(3, 5), p=0.3),
+        A.RandomBrightnessContrast(p=0.5),
+        A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5),
+        A.RandomGamma(p=0.5),
         A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ToTensorV2(),
     ])
     val_transforms = A.Compose([
-        A.Resize(256, 256),
+        A.Resize(height=256, width=256),
         A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ToTensorV2(),
     ])
     return train_transforms, val_transforms
+
 
 def get_dataloaders(train_transforms, val_transforms):
     "Initializes datasets, calculates class weights, and returns data loaders."
@@ -132,23 +146,25 @@ def get_dataloaders(train_transforms, val_transforms):
     val_loader = DataLoader(val_dataset, batch_size=1)
     return train_loader, val_loader, class_weights
 
-def create_model(class_weights):
+
+def create_model(class_weights, encoder_name):
     "Initializes the model, loss functions, optimizer, and scheduler."
     model = smp.DeepLabV3Plus(
-        encoder_name="resnet50",
+        encoder_name=encoder_name,
         encoder_weights="imagenet",
         in_channels=3,
         classes=NUM_CLASSES
     ).to(DEVICE)
+
     ce_loss = torch.nn.CrossEntropyLoss(weight=class_weights, ignore_index=255)
     dice_loss = smp.losses.DiceLoss(mode='binary', from_logits=True)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    # FIX: Corrected the typo from 'lr_sc' to 'lr_scheduler'
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-3)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
     return model, ce_loss, dice_loss, optimizer, scheduler
 
+
 def train_one_epoch(model, loader, ce_loss, dice_loss, optimizer):
-    "Performs one training epoch."
     model.train()
     total_loss = 0
     for images, masks in tqdm(loader, desc="Training"):
@@ -161,8 +177,8 @@ def train_one_epoch(model, loader, ce_loss, dice_loss, optimizer):
         total_loss += loss.item()
     return total_loss / len(loader)
 
+
 def validate_one_epoch(model, loader, ce_loss, dice_loss):
-    "Performs one validation epoch."
     model.eval()
     val_loss = 0
     with torch.no_grad():
@@ -173,8 +189,8 @@ def validate_one_epoch(model, loader, ce_loss, dice_loss):
             val_loss += loss.item()
     return val_loss / len(loader)
 
+
 def plot_losses(train_losses, val_losses):
-    "Plots and saves the loss curve."
     plt.figure(figsize=(10, 6))
     plt.plot(range(1, len(train_losses) + 1), train_losses, label='Train Loss')
     plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss')
@@ -188,41 +204,56 @@ def plot_losses(train_losses, val_losses):
     print("Loss curve saved as 'loss_curve.png'")
     plt.close()
 
+
 def main():
-  
     train_transforms, val_transforms = get_transforms()
     train_loader, val_loader, class_weights = get_dataloaders(train_transforms, val_transforms)
-    model, ce_loss, dice_loss, optimizer, scheduler = create_model(class_weights)
+    model, ce_loss, dice_loss, optimizer, scheduler = create_model(class_weights, ENCODER_NAME)
 
+    writer = SummaryWriter('runs/deeplabv3_experiment_1')
     print(f"Starting training on {DEVICE} for {EPOCHS} epochs...\n")
 
     train_losses = []
     val_losses = []
     best_val_loss = float('inf')
+    patience_counter = 0 
 
     for epoch in range(EPOCHS):
         avg_train_loss = train_one_epoch(model, train_loader, ce_loss, dice_loss, optimizer)
         train_losses.append(avg_train_loss)
+        writer.add_scalar('Loss/train', avg_train_loss, epoch)
         print(f" Epoch {epoch + 1} Train Loss: {avg_train_loss:.4f}")
 
         avg_val_loss = validate_one_epoch(model, val_loader, ce_loss, dice_loss)
         val_losses.append(avg_val_loss)
+        writer.add_scalar('Loss/val', avg_val_loss, epoch)
         print(f" Epoch {epoch + 1} Val Loss:   {avg_val_loss:.4f}\n")
 
         scheduler.step(avg_val_loss)
 
-        epoch_model_path = f"deeplabv3plus_horizon_epoch_{epoch+1}.pth"
-        torch.save(model.state_dict(), epoch_model_path)
-        print(f" Saved model for epoch {epoch+1} as {epoch_model_path}")
-
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), "deeplabv3plus_horizon_best4.pth")
+            patience_counter = 0 
+            torch.save(model.state_dict(), f"deeplabv3plus_horizon_best.pth")
             print(f" Saved best model with validation loss: {best_val_loss:.4f}")
+        else:
+            patience_counter += 1 
+            print(f" Validation loss did not improve. Patience: {patience_counter}/{PATIENCE}") 
 
-    torch.save(model.state_dict(), "deeplabv3plus_horizon_last_epoch4.pth")
-    print("Model saved (last epoch) as deeplabv3plus_horizon_last_epoch4.pth")
+        if patience_counter >= PATIENCE:
+            print(f"\nEarly stopping triggered after {epoch + 1} epochs. Training stopped.") 
+            break
+  
+        if (epoch + 1) % 10 == 0:
+            epoch_model_path = f"deeplabv3plus_horizon_epoch_{epoch+1}.pth"
+            torch.save(model.state_dict(), epoch_model_path)
+            print(f" Saved model for epoch {epoch+1} as {epoch_model_path}")
+
+    writer.close()
+    torch.save(model.state_dict(), f"deeplabv3plus_horizon_last.pth")
+    print("Model saved (last epoch) as deeplabv3plus_horizon_last.pth")
     plot_losses(train_losses, val_losses)
+
 
 if __name__ == "__main__":
     main()

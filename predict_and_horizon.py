@@ -10,14 +10,18 @@ from albumentations.pytorch import ToTensorV2
 from scipy import ndimage
 from google.colab import drive
 
-#2. Config
+# 1. CONFIG
 
+ENCODER_NAME = "resnet101"
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-DATA_DIR = '/content/Deeplab_V3_dataset' 
+# 2. PATHS
 
-MODEL_PATH_BEST = os.path.join(DATA_DIR, 'deeplabv3plus_horizon_best4.pth')
-MODEL_PATH_LAST = os.path.join(DATA_DIR, 'deeplabv3plus_horizon_last_epoch4.pth')
+DATA_DIR = '/content/horizon_dataset_1'
+
+MODEL_PATH_BEST = os.path.join(DATA_DIR, f'deeplabv3plus_horizon_best.pth')
+MODEL_PATH_LAST = os.path.join(DATA_DIR, f'deeplabv3plus_horizon_last.pth')
+
 IMAGE_DIR = os.path.join(DATA_DIR, 'sample_test_images')
 OUTPUT_DIR = os.path.join(DATA_DIR, 'predictions_output')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -25,9 +29,10 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # 3. HELPER FUNCTIONS
 
 def get_transforms():
-    """Returns the Albumentations transform for inference."""
+    "Returns the Albumentations transform for inference."
+
     return A.Compose([
-        A.Resize(256, 256),
+        A.Resize(height=256, width=256),
         A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
         ToTensorV2(),
     ])
@@ -46,7 +51,7 @@ def load_model(encoder_name, model_path_best, model_path_last, device):
         model.load_state_dict(torch.load(model_path_best, map_location=device))
         print(f"Successfully loaded best model from {model_path_best}")
     except FileNotFoundError:
-        print(f"Best model not found. Trying last epoch model...")
+        print(f"Best model not found at {model_path_best}. Trying last epoch model...")
         try:
             model.load_state_dict(torch.load(model_path_last, map_location=device))
             print(f"Successfully loaded last model from {model_path_last}")
@@ -138,7 +143,7 @@ def run_inference(model, transform, image_dir, output_dir):
             pred_mask = torch.argmax(output.squeeze(0), dim=0).cpu().numpy().astype(np.uint8)
 
         pred_mask_resized = cv2.resize(pred_mask, (orig_img_np.shape[1], orig_img_np.shape[0]),
-                                       interpolation=cv2.INTER_NEAREST)
+                                     interpolation=cv2.INTER_NEAREST)
         pred_mask_path = os.path.join(output_dir, f"mask_pred_{img_name}")
         cv2.imwrite(pred_mask_path, pred_mask_resized * 255)
 
@@ -191,9 +196,11 @@ def run_inference(model, transform, image_dir, output_dir):
 
     print("\nPrediction process completed!")
 
+
 # 4. MAIN EXECUTION
 
 if __name__ == "__main__":
     inference_transform = get_transforms()
-    loaded_model = load_model("resnet50", MODEL_PATH_BEST, MODEL_PATH_LAST, DEVICE)
+
+    loaded_model = load_model(ENCODER_NAME, MODEL_PATH_BEST, MODEL_PATH_LAST, DEVICE)
     run_inference(loaded_model, inference_transform, IMAGE_DIR, OUTPUT_DIR)

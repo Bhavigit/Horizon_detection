@@ -15,10 +15,10 @@ from torch.utils.tensorboard import SummaryWriter
 DATA_DIR = "/content/horizon_dataset_1"
 IMAGE_DIR = os.path.join(DATA_DIR, 'images')
 MASK_DIR = os.path.join(DATA_DIR, 'masks')
-BATCH_SIZE = 4
+BATCH_SIZE = 8
 NUM_CLASSES = 2
-EPOCHS = 100
-PATIENCE = 15
+EPOCHS = 300
+PATIENCE = 25
 ENCODER_NAME = "resnet101"
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -143,7 +143,7 @@ def get_dataloaders(train_transforms, val_transforms):
         print(f"Calculated class weights: {class_weights}")
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=1)
+    val_loader = DataLoader(val_dataset, batch_size=8)
     return train_loader, val_loader, class_weights
 
 
@@ -216,7 +216,7 @@ def main():
     train_losses = []
     val_losses = []
     best_val_loss = float('inf')
-    patience_counter = 0 
+    patience_counter = 0
 
     for epoch in range(EPOCHS):
         avg_train_loss = train_one_epoch(model, train_loader, ce_loss, dice_loss, optimizer)
@@ -233,17 +233,17 @@ def main():
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            patience_counter = 0 
+            patience_counter = 0
             torch.save(model.state_dict(), f"deeplabv3plus_horizon_best.pth")
             print(f" Saved best model with validation loss: {best_val_loss:.4f}")
         else:
-            patience_counter += 1 
-            print(f" Validation loss did not improve. Patience: {patience_counter}/{PATIENCE}") 
+            patience_counter += 1
+            print(f" Validation loss did not improve. Patience: {patience_counter}/{PATIENCE}")
 
         if patience_counter >= PATIENCE:
-            print(f"\nEarly stopping triggered after {epoch + 1} epochs. Training stopped.") 
+            print(f"\nEarly stopping triggered after {epoch + 1} epochs. Training stopped.")
             break
-  
+
         if (epoch + 1) % 10 == 0:
             epoch_model_path = f"deeplabv3plus_horizon_epoch_{epoch+1}.pth"
             torch.save(model.state_dict(), epoch_model_path)
